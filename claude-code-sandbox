@@ -1,0 +1,518 @@
+#!/bin/bash
+
+# Sandboxed Claude Code CLI wrapper
+# Based on https://github.com/cwensel/claude-sandbox/blob/main/claudes
+
+# Function to generate random suffix
+generate_random_suffix() {
+    head /dev/urandom | tr -dc a-z0-9 | head -c 8
+}
+
+# Define base image name (shared across all workspaces)
+BASE_IMAGE_NAME="claude-code-sandbox-base"
+
+# Function to get content hash for change detection
+get_content_hash() {
+    {
+        # Hash Dockerfile content
+        cat "$1/Dockerfile" 2>/dev/null || echo "no-dockerfile"
+        # Hash .tool-versions if present
+        cat ".tool-versions" 2>/dev/null || echo "no-tool-versions" 
+    } | sha256sum | cut -d' ' -f1 | head -c 8
+}
+
+# Determine image name based on local .claude-code-sandbox file or create new one
+SANDBOX_FILE=".claude-code-sandbox"
+if [ -f "$SANDBOX_FILE" ]; then
+    IMAGE_NAME=$(cat "$SANDBOX_FILE")
+    echo "Using existing workspace image: $IMAGE_NAME"
+else
+    # Generate new image name with random suffix
+    RANDOM_SUFFIX=$(generate_random_suffix)
+    IMAGE_NAME="claude-code-sandbox-${RANDOM_SUFFIX}"
+    echo "$IMAGE_NAME" > "$SANDBOX_FILE"
+    echo "Created new workspace image: $IMAGE_NAME"
+fi
+
+# Parse command line options
+BUILD_IMAGE=false
+SHELL_MODE=false
+NON_INTERACTIVE=false
+DOCKER_ENABLED=false
+INSTALL_TOOLS=""
+CLEANUP_MODE=false
+CLEANUP_DAYS=7
+DRY_RUN=false
+
+while getopts "bsnd-:" opt; do
+    case $opt in
+        b)
+            BUILD_IMAGE=true
+            ;;
+        s)
+            SHELL_MODE=true
+            ;;
+        n)
+            NON_INTERACTIVE=true
+            ;;
+        d)
+            DOCKER_ENABLED=true
+            ;;
+        -)
+            case "${OPTARG}" in
+                build)
+                    BUILD_IMAGE=true
+                    ;;
+                install=*)
+                    INSTALL_TOOLS="${OPTARG#*=}"
+                    ;;
+                shell)
+                    SHELL_MODE=true
+                    ;;
+                non-interactive)
+                    NON_INTERACTIVE=true
+                    ;;
+                docker)
+                    DOCKER_ENABLED=true
+                    ;;
+                cleanup)
+                    CLEANUP_MODE=true
+                    ;;
+                older-than=*)
+                    CLEANUP_DAYS="${OPTARG#*=}"
+                    # Parse days from format like "7d", "3", "14d"
+                    CLEANUP_DAYS="${CLEANUP_DAYS%d}"
+                    ;;
+                dry-run)
+                    DRY_RUN=true
+                    ;;
+                help)
+                    echo "Claude Code Sandbox - Containerized development environment"
+                    echo ""
+                    echo "Usage: $0 [OPTIONS] [CLAUDE_ARGS...]"
+                    echo ""
+                    echo "Options:"
+                    echo "  -b, --build                   Build/rebuild the Docker image"
+                    echo "  -s, --shell                   Launch interactive shell instead of Claude Code"
+                    echo "  -n, --non-interactive CMD     Run non-interactive command"
+                    echo "  -d, --docker                  Enable Docker access inside container"
+                    echo "      --install=TOOLS           Install tools at build time"
+                    echo "      --cleanup                 Remove old workspace images (default: 7+ days)"
+                    echo "      --older-than=DAYS         Cleanup threshold (e.g. --older-than=3d)"
+                    echo "      --dry-run                 Show what would be cleaned without doing it"
+                    echo "      --help                    Show this help message"
+                    echo ""
+                    echo "Tool Installation:"
+                    echo "  --install='tool1@version1,tool2@version2'"
+                    echo ""
+                    echo "Examples:"
+                    echo "  $0 --build --install='python@3.12.8,golang@1.21.5'"
+                    echo "  $0 --build --install='java@adoptopenjdk-17.0.2+8,terraform@1.5.7'"
+                    echo "  $0 --shell                    # Interactive shell"
+                    echo "  $0 -n 'python --version'     # Non-interactive command"
+                    echo "  $0 --cleanup                  # Remove images older than 7 days"
+                    echo "  $0 --cleanup --older-than=3d  # Remove images older than 3 days"
+                    echo "  $0 --cleanup --dry-run        # Preview cleanup without removing"
+                    echo ""
+                    echo "Auto-completion:"
+                    echo "  Bash: source ./completions/claude-code-sandbox"
+                    echo "  Zsh:  Add ./completions to your fpath and run: autoload -U compinit && compinit"
+                    echo ""
+                    echo "For more information, see: README.md"
+                    exit 0
+                    ;;
+                *)
+                    echo "Unknown option --${OPTARG}" >&2
+                    echo "Usage: $0 --build --install='plugin1@version1,plugin2@version2'"
+                    echo "Examples:"
+                    echo "  $0 --build --install='python@3.12.8,golang@1.21.5,maven@3.9.6'"
+                    echo "  $0 --build --install='java@adoptopenjdk-17.0.2+8,terraform@1.5.7'"
+                    echo "  $0 --build --install='nodejs@20.11.0,rust@1.75.0'"
+                    echo "Use --help for more information"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        \?)
+            echo "Invalid option: -$OPTARG" >&2
+            exit 1
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+# Function to perform image cleanup
+cleanup_images() {
+    local days=$1
+    local dry_run=$2
+    local current_image=$(cat "$SANDBOX_FILE" 2>/dev/null || echo "")
+    
+    echo "=== Claude Code Sandbox Image Cleanup ==="
+    echo "Looking for workspace images older than $days days..."
+    echo "Current workspace image: $current_image"
+    echo "Base image (always preserved): $BASE_IMAGE_NAME"
+    echo ""
+    
+    # Get current timestamp in seconds
+    local current_time=$(date +%s)
+    local cutoff_time=$((current_time - (days * 24 * 3600)))
+    
+    # Find all claude-code-sandbox workspace images (exclude base)
+    local images_to_check=$(docker images --format "{{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}\t{{.Size}}\t{{.ID}}" | \
+        grep "^claude-code-sandbox-" | grep -v "^$BASE_IMAGE_NAME")
+    
+    if [[ -z "$images_to_check" ]]; then
+        echo "No workspace images found to clean up."
+        return 0
+    fi
+    
+    local images_to_remove=()
+    local total_size=0
+    
+    echo "Scanning workspace images:"
+    echo "Repository                        Created                Size      Image ID       Status"
+    echo "----------------------------------------------------------------------------------------"
+    
+    # Process each image
+    while IFS=$'\t' read -r repo tag created_at size image_id; do
+        if [[ -z "$repo" ]]; then continue; fi
+        
+        # Use repo name directly (it should be the image name)
+        local image_name="$repo"
+        
+        # Skip if this is the current workspace image
+        if [[ "$image_name" == "$current_image" ]]; then
+            printf "%-32s %-22s %-9s %-14s %s\n" "$repo" "$created_at" "$size" "$image_id" "(CURRENT - PRESERVED)"
+            continue
+        fi
+        
+        # Parse creation time - remove timezone for compatibility
+        local clean_date=$(echo "$created_at" | sed 's/ -[0-9]* [A-Z]*$//')
+        local image_time
+        if command -v gdate >/dev/null 2>&1; then
+            # macOS with coreutils
+            image_time=$(gdate -d "$clean_date" +%s 2>/dev/null || echo 0)
+        else
+            # Linux date
+            image_time=$(date -d "$clean_date" +%s 2>/dev/null || echo 0)
+        fi
+        
+        if [[ $image_time -lt $cutoff_time ]]; then
+            printf "%-32s %-22s %-9s %-14s %s\n" "$repo" "$created_at" "$size" "$image_id" "(MARKED FOR REMOVAL)"
+            images_to_remove+=("$image_name")
+            # Convert size to bytes for summing (rough estimate)
+            local size_mb=$(echo "$size" | sed 's/[^0-9.]//g')
+            if [[ -n "$size_mb" && "$size_mb" != "" ]]; then
+                total_size=$((total_size + ${size_mb%.*}))
+            fi
+        else
+            printf "%-32s %-22s %-9s %-14s %s\n" "$repo" "$created_at" "$size" "$image_id" "(TOO RECENT - PRESERVED)"
+        fi
+    done <<< "$images_to_check"
+    
+    echo ""
+    
+    if [[ ${#images_to_remove[@]} -eq 0 ]]; then
+        echo "✅ No images need cleanup (all are either current workspace, base image, or too recent)"
+        return 0
+    fi
+    
+    echo "📋 Summary:"
+    echo "  Images to remove: ${#images_to_remove[@]}"
+    echo "  Estimated space to reclaim: ~${total_size}MB"
+    echo ""
+    
+    if [[ "$dry_run" == "true" ]]; then
+        echo "🔍 DRY RUN - No images will actually be removed"
+        echo "Images that would be removed:"
+        for image in "${images_to_remove[@]}"; do
+            echo "  - $image"
+        done
+        return 0
+    fi
+    
+    # Confirm removal
+    echo "⚠️  This will permanently remove ${#images_to_remove[@]} Docker images."
+    echo "Are you sure you want to continue? (y/N)"
+    read -r confirmation
+    
+    if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
+        echo "❌ Cleanup cancelled"
+        return 0
+    fi
+    
+    echo ""
+    echo "🗑️  Removing images..."
+    
+    local removed_count=0
+    for image in "${images_to_remove[@]}"; do
+        echo "Removing: $image"
+        if docker rmi "$image" >/dev/null 2>&1; then
+            echo "  ✅ Removed successfully"
+            ((removed_count++))
+        else
+            echo "  ⚠️  Failed to remove (might be in use)"
+        fi
+    done
+    
+    echo ""
+    echo "✅ Cleanup complete!"
+    echo "  Successfully removed: $removed_count/${#images_to_remove[@]} images"
+    
+    if [[ $removed_count -gt 0 ]]; then
+        echo ""
+        echo "💡 Consider running 'docker system prune' to reclaim additional space from dangling images and build cache"
+    fi
+}
+
+# Handle cleanup mode
+if [[ "$CLEANUP_MODE" == true ]]; then
+    cleanup_images "$CLEANUP_DAYS" "$DRY_RUN"
+    exit 0
+fi
+
+# Check if tools are specified without --build
+if [[ "$BUILD_IMAGE" != true && -n "$INSTALL_TOOLS" ]]; then
+    echo "Error: Tools can only be installed with --build flag"
+    echo "Usage: $0 --build --install='plugin@version,plugin@version'"
+    echo "Examples:"
+    echo "  $0 --build --install='python@3.12.8,golang@1.21.5'"
+    echo "  $0 --build --install='terraform@1.5.7,maven@3.9.6,kubectl@1.28.0'"
+    echo "This ensures tools are installed at build time, not runtime"
+    exit 1
+fi
+
+# Check for .tool-versions file if --build is specified but no --install
+if [[ "$BUILD_IMAGE" == true && -z "$INSTALL_TOOLS" && -f ".tool-versions" ]]; then
+    echo "Found .tool-versions file, parsing for tool installation..."
+    # Parse .tool-versions file and convert to comma-separated format
+    TOOL_VERSIONS_CONTENT=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        if [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
+            # Extract plugin and version
+            read -r plugin version <<< "$line"
+            if [[ -n "$plugin" && -n "$version" ]]; then
+                if [[ -n "$TOOL_VERSIONS_CONTENT" ]]; then
+                    TOOL_VERSIONS_CONTENT="$TOOL_VERSIONS_CONTENT,$plugin@$version"
+                else
+                    TOOL_VERSIONS_CONTENT="$plugin@$version"
+                fi
+            fi
+        fi
+    done < ".tool-versions"
+    
+    if [[ -n "$TOOL_VERSIONS_CONTENT" ]]; then
+        INSTALL_TOOLS="$TOOL_VERSIONS_CONTENT"
+        echo "Installing tools from .tool-versions: $INSTALL_TOOLS"
+    fi
+fi
+
+# Get the directory where this script is located (handles symlinks)
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# Check if base image needs to be built/updated
+BASE_IMAGE_EXISTS="$(docker images -q $BASE_IMAGE_NAME 2> /dev/null)"
+if [[ -z "$BASE_IMAGE_EXISTS" ]]; then
+    echo "Building shared base image: $BASE_IMAGE_NAME"
+    docker build -f "$SCRIPT_DIR/Dockerfile" --target base -t $BASE_IMAGE_NAME "$SCRIPT_DIR"
+fi
+
+# Generate content hash for incremental build detection
+CONTENT_HASH=$(get_content_hash "$SCRIPT_DIR")
+HASH_FILE=".claude-code-sandbox-hash"
+
+# Check if rebuild is needed
+NEEDS_REBUILD=false
+if [[ "$BUILD_IMAGE" == true ]]; then
+    NEEDS_REBUILD=true
+    echo "Forced rebuild requested"
+elif [[ -n "$INSTALL_TOOLS" ]]; then
+    NEEDS_REBUILD=true
+    echo "Tools specified, rebuild needed"
+elif [[ "$(docker images -q $IMAGE_NAME 2> /dev/null)" == "" ]]; then
+    NEEDS_REBUILD=true
+    echo "Image doesn't exist, rebuild needed"
+elif [[ ! -f "$HASH_FILE" ]] || [[ "$(cat "$HASH_FILE" 2>/dev/null)" != "$CONTENT_HASH" ]]; then
+    NEEDS_REBUILD=true
+    echo "Configuration changed, incremental rebuild needed"
+fi
+
+# Build workspace-specific image if needed
+if [[ "$NEEDS_REBUILD" == true ]]; then
+    echo "Building workspace image: $IMAGE_NAME"
+    BUILD_ARGS="--build-arg BASE_IMAGE=$BASE_IMAGE_NAME"
+    if [ -n "$INSTALL_TOOLS" ]; then
+        BUILD_ARGS="$BUILD_ARGS --build-arg INSTALL_TOOLS='$INSTALL_TOOLS'"
+        echo "Installing tools: $INSTALL_TOOLS"
+    fi
+    docker build $BUILD_ARGS -f "$SCRIPT_DIR/Dockerfile" --target workspace -t $IMAGE_NAME "$SCRIPT_DIR"
+    
+    # Save content hash for future incremental builds
+    echo "$CONTENT_HASH" > "$HASH_FILE"
+else
+    echo "No changes detected, using existing image: $IMAGE_NAME"
+fi
+
+
+# Check for Claude configuration directories
+CLAUDE_CONFIG=""
+
+# Check for .claude directory
+if [ -d "$HOME/.claude" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.claude:/home/node/.claude"
+    echo "Mounting Claude config from $HOME/.claude"
+fi
+
+# Check for .config/claude directory
+if [ -d "$HOME/.config/claude" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.config/claude:/home/node/.config/claude"
+    echo "Mounting Claude config from $HOME/.config/claude"
+fi
+
+# Check for .anthropic directory
+if [ -d "$HOME/.anthropic" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.anthropic:/home/node/.anthropic"
+    echo "Mounting Anthropic config from $HOME/.anthropic"
+fi
+
+# Check for .m2 directory (Maven)
+if [ -d "$HOME/.m2" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.m2:/home/node/.m2"
+    echo "Mounting Maven config from $HOME/.m2"
+fi
+
+# Check for .gradle directory (Gradle)
+if [ -d "$HOME/.gradle" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.gradle:/home/node/.gradle"
+    echo "Mounting Gradle config from $HOME/.gradle"
+fi
+
+# Check for .npm directory (Node.js)
+if [ -d "$HOME/.npm" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.npm:/home/node/.npm"
+    echo "Mounting npm cache from $HOME/.npm"
+fi
+
+# Check for .cache directory (covers pip, yarn, pnpm, go-build, deno, composer, etc.)
+if [ -d "$HOME/.cache" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.cache:/home/node/.cache"
+    echo "Mounting cache directory from $HOME/.cache"
+fi
+
+# Check for .pnpm-store directory (pnpm global store)
+if [ -d "$HOME/.pnpm-store" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.pnpm-store:/home/node/.pnpm-store"
+    echo "Mounting pnpm store from $HOME/.pnpm-store"
+fi
+
+# Check for .cargo directory (Rust)
+if [ -d "$HOME/.cargo" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.cargo:/home/node/.cargo"
+    echo "Mounting Cargo config from $HOME/.cargo"
+fi
+
+# Check for go directory (Go modules)
+if [ -d "$HOME/go" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/go:/home/node/go"
+    echo "Mounting Go workspace from $HOME/go"
+fi
+
+
+# Check for .gem directory (Ruby gems)
+if [ -d "$HOME/.gem" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.gem:/home/node/.gem"
+    echo "Mounting Ruby gems from $HOME/.gem"
+fi
+
+# Check for .bundle directory (Ruby bundler)
+if [ -d "$HOME/.bundle" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.bundle:/home/node/.bundle"
+    echo "Mounting Ruby bundle config from $HOME/.bundle"
+fi
+
+
+# Check for .nuget directory (NuGet packages)
+if [ -d "$HOME/.nuget" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.nuget:/home/node/.nuget"
+    echo "Mounting NuGet packages from $HOME/.nuget"
+fi
+
+
+# Check for .bun directory (Bun)
+if [ -d "$HOME/.bun" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.bun:/home/node/.bun"
+    echo "Mounting Bun config from $HOME/.bun"
+fi
+
+# Check for .claude.json file (main Claude config)
+if [ -f "$HOME/.claude.json" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/.claude.json:/home/node/.claude.json"
+    echo "Mounting Claude config from $HOME/.claude.json"
+fi
+
+# Check for basic-memory directory (basic-memory MCP server)
+if [ -d "$HOME/basic-memory" ]; then
+    CLAUDE_CONFIG="$CLAUDE_CONFIG -v $HOME/basic-memory:/home/node/basic-memory"
+    echo "Mounting basic-memory MCP server from $HOME/basic-memory"
+fi
+
+# Add Docker socket mounting if Docker flag is enabled
+DOCKER_MOUNT=""
+if [ "$DOCKER_ENABLED" = true ]; then
+    if [ -S "/var/run/docker.sock" ]; then
+        DOCKER_MOUNT="-v /var/run/docker.sock:/var/run/docker.sock"
+        echo "Mounting Docker socket for container access"
+    else
+        echo "Warning: Docker socket not found at /var/run/docker.sock"
+        echo "Docker commands may not work inside the container"
+    fi
+fi
+
+if [ -z "$CLAUDE_CONFIG" ]; then
+    echo "Warning: No configuration directories found"
+fi
+
+# Check if we have a TTY or if non-interactive mode is requested
+if [ -t 0 ] || [ "$NON_INTERACTIVE" = true ]; then
+    if [ "$SHELL_MODE" = true ]; then
+        # Run interactive shell instead of Claude Code
+        docker run -it --rm \
+            --user node \
+            -v "$(pwd):/workspace" \
+            $CLAUDE_CONFIG \
+            $DOCKER_MOUNT \
+            -e TERM="$TERM" \
+            --init \
+            $IMAGE_NAME \
+            bash -c "source ~/.asdf/asdf.sh 2>/dev/null || true; exec bash"
+    elif [ "$NON_INTERACTIVE" = true ]; then
+        # Run non-interactive command with asdf support
+        docker run --rm \
+            --user node \
+            -v "$(pwd):/workspace" \
+            $CLAUDE_CONFIG \
+            $DOCKER_MOUNT \
+            --init \
+            $IMAGE_NAME \
+            bash -c "source ~/.asdf/asdf.sh 2>/dev/null || true; $*"
+    else
+        # Run the container with current directory mounted as workspace
+        docker run -it --rm \
+            --user node \
+            -v "$(pwd):/workspace" \
+            $CLAUDE_CONFIG \
+            $DOCKER_MOUNT \
+            -e TERM="$TERM" \
+            --init \
+            $IMAGE_NAME \
+            claude-wrapper --dangerously-skip-permissions "$@"
+    fi
+else
+    echo "Error: This script requires an interactive terminal (TTY)."
+    echo "Please run this script from a regular terminal, not from within another program."
+    echo "The script is designed to launch an interactive Claude session."
+    echo "Use -n or --non-interactive to run commands without TTY."
+    exit 1
+fi

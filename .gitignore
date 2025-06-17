@@ -1,0 +1,11 @@
+# Claude Code Sandbox workspace-specific files
+.claude
+.claude-code-sandbox
+.claude-code-sandbox-hash
+
+# Tool versions file (workspace-specific)
+.tool-versions
+
+# Test directories
+test-venv/
+/CLAUDE.md

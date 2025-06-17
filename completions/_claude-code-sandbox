@@ -1,0 +1,70 @@
+#compdef claude-code-sandbox claude-sandbox claudes-code
+
+# Zsh completion for claude-code-sandbox
+
+_claude_code_sandbox() {
+    local context state line
+    typeset -A opt_args
+
+    # Common asdf plugins for completion
+    local common_tools=(
+        "python:Python programming language"
+        "nodejs:Node.js JavaScript runtime"
+        "java:Java Development Kit"
+        "golang:Go programming language"
+        "rust:Rust programming language"
+        "php:PHP programming language"
+        "ruby:Ruby programming language"
+        "dotnet:.NET runtime and SDK"
+        "terraform:Infrastructure as Code tool"
+        "kubectl:Kubernetes command-line tool"
+        "helm:Kubernetes package manager"
+        "docker-compose:Docker Compose tool"
+        "maven:Java build automation tool"
+        "gradle:Gradle build tool"
+        "cmake:Cross-platform build system"
+        "make:GNU Make build tool"
+        "postgres:PostgreSQL database"
+        "mysql:MySQL database"
+        "redis:Redis data structure store"
+        "jq:JSON processor"
+        "yq:YAML processor"
+        "fzf:Fuzzy finder"
+        "bat:Cat clone with syntax highlighting"
+        "exa:Modern ls replacement"
+    )
+
+    _arguments -C \
+        '(-b --build)'{-b,--build}'[Build or rebuild the Docker image]' \
+        '(-s --shell)'{-s,--shell}'[Launch interactive shell instead of Claude Code]' \
+        '(-n --non-interactive)'{-n,--non-interactive}'[Run non-interactive commands]:command:_command_names' \
+        '(-d --docker)'{-d,--docker}'[Enable Docker access inside container]' \
+        '--install=[Install tools at build time]:tool list:_claude_tools' \
+        '--help[Show help message]' \
+        '*::args:_files'
+}
+
+_claude_tools() {
+    local -a tools
+    local current_tools="${words[CURRENT]}"
+    
+    # Handle comma-separated list
+    if [[ $current_tools == *,* ]]; then
+        local prefix="${current_tools%,*},"
+        local current_tool="${current_tools##*,}"
+        
+        # If current tool doesn't have @, suggest tools
+        if [[ $current_tool != *@* ]]; then
+            tools=("${(@)common_tools[@]}")
+            _describe -t tools "asdf plugins" tools -S '@'
+        fi
+    else
+        # First tool
+        if [[ $current_tools != *@* ]]; then
+            tools=("${(@)common_tools[@]}")
+            _describe -t tools "asdf plugins" tools -S '@'
+        fi
+    fi
+}
+
+_claude_code_sandbox "$@"

@@ -1,0 +1,77 @@
+#!/bin/bash
+# Bash completion for claude-code-sandbox
+
+_claude_code_sandbox() {
+    local cur prev opts tools
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    # Available options
+    opts="-b --build -s --shell -n --non-interactive -d --docker --install= --help"
+
+    # Handle --install= completion
+    if [[ ${cur} == --install=* ]]; then
+        # Extract current tool list and position
+        local install_value="${cur#--install=}"
+        local tools_list="${install_value%@*}"
+        
+        # Common asdf plugins for completion
+        local common_tools="python nodejs java golang rust php ruby dotnet terraform kubectl helm docker-compose maven gradle cmake make postgres mysql redis jq yq fzf bat exa"
+        
+        # If we're at a comma position, suggest tools
+        if [[ ${install_value} == *,* ]]; then
+            local current_tool="${install_value##*,}"
+            if [[ ${current_tool} != *@* ]]; then
+                COMPREPLY=( $(compgen -W "${common_tools}" -- "${current_tool}") )
+                # Add @ suffix for version specification
+                COMPREPLY=( "${COMPREPLY[@]/%/@}" )
+            fi
+        else
+            # First tool
+            COMPREPLY=( $(compgen -W "${common_tools}" -- "${install_value}") )
+            # Add @ suffix for version specification
+            COMPREPLY=( "${COMPREPLY[@]/%/@}" )
+        fi
+        
+        # Prefix completions with --install=
+        local prefix="${cur%${install_value}}${install_value%${current_tool:-${install_value}}}"
+        COMPREPLY=( "${COMPREPLY[@]/#/${prefix}}" )
+        return 0
+    fi
+
+    # Handle install= (without --) completion
+    if [[ ${prev} == "--install" ]]; then
+        # This shouldn't happen with our syntax, but handle it gracefully
+        COMPREPLY=( $(compgen -W "python@ nodejs@ java@ golang@ rust@ terraform@" -- ${cur}) )
+        return 0
+    fi
+
+    # Regular option completion
+    case ${prev} in
+        -n|--non-interactive)
+            # Suggest common commands for non-interactive mode
+            COMPREPLY=( $(compgen -W '"echo python node --version" "ls -la" "which python"' -- ${cur}) )
+            return 0
+            ;;
+        *)
+            ;;
+    esac
+
+    # Default completion
+    if [[ ${cur} == -* ]]; then
+        COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+        return 0
+    fi
+
+    # File completion for other arguments
+    COMPREPLY=( $(compgen -f -- ${cur}) )
+    return 0
+}
+
+# Register the completion function
+complete -F _claude_code_sandbox claude-code-sandbox
+
+# Also register for common symlink names
+complete -F _claude_code_sandbox claude-sandbox
+complete -F _claude_code_sandbox claudes-code
