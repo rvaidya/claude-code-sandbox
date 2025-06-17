@@ -2,6 +2,8 @@
 
 A sandboxed Docker-based wrapper for running [Claude Code](https://github.com/anthropics/claude-code) CLI in an isolated environment with `--dangerously-skip-permissions` enabled **safely**.
 
+**🛠️ Built on [asdf](https://asdf-vm.com/)** - Install any programming language, runtime, or tool (500+ available) directly in your development container.
+
 ## ⚠️ Why This Wrapper Exists
 
 Claude Code's `--dangerously-skip-permissions` flag can be incredibly powerful for development workflows, but as the name suggests, it can be dangerous when run directly on your system. There are horror stories on Reddit and elsewhere of users accidentally damaging their systems.
@@ -12,14 +14,38 @@ Claude Code's `--dangerously-skip-permissions` flag can be incredibly powerful f
 - Protecting your host system while still allowing full development capabilities
 - Preserving access to your project files and development configurations
 
+## 🚀 Quick Start - Tool Installation
+
+Install any development tools you need using [asdf plugins](https://github.com/asdf-vm/asdf-plugins):
+
+```bash
+# Install specific language versions
+./claude-code-sandbox --build --install='python@3.12.8,java@adoptopenjdk-17.0.2+8,maven@3.9.6'
+
+# Install multiple tools with versions
+./claude-code-sandbox --build --install='golang@1.21.5,nodejs@20.11.0,terraform@1.5.7'
+
+# Use .tool-versions file (asdf standard)
+echo "python 3.12.8
+nodejs 20.11.0
+java adoptopenjdk-17.0.2+8
+maven 3.9.6" > .tool-versions
+
+./claude-code-sandbox  # Auto-detects and installs from .tool-versions
+
+# Test your tools
+./claude-code-sandbox -n "python --version && java -version && mvn --version"
+```
+
 ## Features
 
+- 🛠️ **500+ Development Tools**: Install any language or tool via [asdf plugins](https://github.com/asdf-vm/asdf-plugins) (Python, Java, Node.js, Go, Rust, Maven, Terraform, etc.)
+- 📄 **.tool-versions Support**: Drop in a [`.tool-versions`](https://asdf-vm.com/manage/configuration.html#tool-versions) file and tools install automatically
 - 🐳 **Dockerized Environment**: Runs Claude Code in an isolated Debian slim container
-- 🔧 **Configuration Mounting**: Automatically detects and mounts common development configurations
-- 📦 **Dynamic Tool Installation**: Install any development tools at build time using asdf plugins
-- 🏠 **Workspace-Specific Images**: Each workspace gets its own Docker image for complete isolation
+- 🏠 **Workspace-Specific Images**: Each workspace gets its own Docker image for complete tool isolation
 - ⚡ **Incremental Builds**: Smart caching only rebuilds when tools or configuration change
 - 🚀 **Shared Base Layers**: Efficient Docker layer sharing reduces disk usage across workspaces
+- 🔧 **Configuration Mounting**: Automatically detects and mounts common development configurations
 - 🔧 **Auto-completion**: Bash and Zsh completion for commands and tool names
 - 🛡️ **Security**: Sandboxed execution prevents potential system modifications
 - 🔄 **Live Updates**: Your current working directory is mounted for real-time file access
@@ -84,6 +110,46 @@ On first execution, the Docker image will be automatically built:
 claude-code-sandbox
 ```
 
+### Tool Installation (asdf-based)
+
+**Install any development tools you need using the `--install` flag:**
+
+```bash
+# Install specific language versions
+claude-code-sandbox --build --install='python@3.12.8,java@adoptopenjdk-17.0.2+8'
+
+# Install build tools and DevOps tools
+claude-code-sandbox --build --install='maven@3.9.6,terraform@1.5.7,kubectl@1.28.0'
+
+# Install the latest versions (no @ symbol)
+claude-code-sandbox --build --install='golang,rust,nodejs'
+
+# Test installed tools
+claude-code-sandbox -n "python --version && java -version && mvn --version"
+```
+
+**Or use a `.tool-versions` file (recommended for projects):**
+
+```bash
+# Create .tool-versions file
+cat > .tool-versions << EOF
+python 3.12.8
+nodejs 20.11.0
+java adoptopenjdk-17.0.2+8
+maven 3.9.6
+terraform 1.5.7
+EOF
+
+# Auto-install from .tool-versions (no --build needed)
+claude-code-sandbox
+
+# Tools are now available in both shell and Claude Code
+claude-code-sandbox --shell  # Interactive development
+claude-code-sandbox          # Claude Code with all tools
+```
+
+**Available Tools:** Any [asdf plugin](https://github.com/asdf-vm/asdf-plugins) (500+ tools including Python, Java, Node.js, Go, Rust, Maven, Gradle, Terraform, kubectl, Docker Compose, and more).
+
 ### Basic Commands
 
 ```bash
@@ -146,43 +212,6 @@ autoload -U compinit && compinit
 - Context-aware completion for comma-separated tool lists
 ```
 
-### Dynamic Tool Installation
-
-Install development tools at build time using [asdf](https://asdf-vm.com/) plugins:
-
-```bash
-# Install specific language versions
-claude-code-sandbox --build --install='python@3.12.8,java@adoptopenjdk-17.0.2+8'
-
-# Install multiple tools with versions
-claude-code-sandbox --build --install='golang@1.21.5,maven@3.9.6,terraform@1.5.7'
-
-# Install tools and enter shell to test
-claude-code-sandbox --build --shell --install='nodejs@20.11.0,rust@1.75.0'
-
-# Install tools and start Claude Code
-claude-code-sandbox --build --install='python@3.12.8,kubectl@1.28.0'
-
-# Automatically install from .tool-versions file (if present in workspace)
-claude-code-sandbox --build
-```
-
-**Supported Tools:**
-Any [asdf plugin](https://github.com/asdf-vm/asdf-plugins) is supported. Popular examples include:
-- **Languages**: `python`, `golang`, `java`, `ruby`, `php`, `rust`, `dotnet`
-- **Build Tools**: `maven`, `gradle`, `cmake`, `make`
-- **DevOps**: `terraform`, `kubectl`, `helm`, `awscli`, `docker-compose`
-- **Databases**: `postgres`, `mysql`, `redis`
-- **Utilities**: `jq`, `yq`, `fzf`, `bat`, `exa`
-
-To find available plugins and versions:
-```bash
-# List all available asdf plugins
-claude-code-sandbox -n "asdf plugin list all"
-
-# List versions for a specific plugin
-claude-code-sandbox -n "asdf list all python"
-```
 
 ### .tool-versions File Support
 
