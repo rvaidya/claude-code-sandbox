@@ -43,6 +43,8 @@ INSTALL_TOOLS=""
 CLEANUP_MODE=false
 CLEANUP_DAYS=7
 DRY_RUN=false
+REBUILD_IMAGE=false
+REMOVE_IMAGE=false
 
 while getopts "bsnd-:" opt; do
     case $opt in
@@ -86,6 +88,13 @@ while getopts "bsnd-:" opt; do
                 dry-run)
                     DRY_RUN=true
                     ;;
+                rebuild)
+                    REBUILD_IMAGE=true
+                    BUILD_IMAGE=true
+                    ;;
+                remove)
+                    REMOVE_IMAGE=true
+                    ;;
                 help)
                     echo "Claude Code Sandbox - Containerized development environment"
                     echo ""
@@ -97,6 +106,8 @@ while getopts "bsnd-:" opt; do
                     echo "  -n, --non-interactive CMD     Run non-interactive command"
                     echo "  -d, --docker                  Enable Docker access inside container"
                     echo "      --install=TOOLS           Install tools at build time"
+                    echo "      --rebuild                 Force full rebuild without cache"
+                    echo "      --remove                  Remove workspace image and state files"
                     echo "      --cleanup                 Remove old workspace images (default: 7+ days)"
                     echo "      --older-than=DAYS         Cleanup threshold (e.g. --older-than=3d)"
                     echo "      --dry-run                 Show what would be cleaned without doing it"
@@ -108,6 +119,8 @@ while getopts "bsnd-:" opt; do
                     echo "Examples:"
                     echo "  $0 --build --install='python@3.12.8,golang@1.21.5'"
                     echo "  $0 --build --install='java@adoptopenjdk-17.0.2+8,terraform@1.5.7'"
+                    echo "  $0 --rebuild                  # Force complete rebuild without cache"
+                    echo "  $0 --remove                   # Remove current workspace image"
                     echo "  $0 --shell                    # Interactive shell"
                     echo "  $0 -n 'python --version'     # Non-interactive command"
                     echo "  $0 --cleanup                  # Remove images older than 7 days"
@@ -272,6 +285,50 @@ if [[ "$CLEANUP_MODE" == true ]]; then
     exit 0
 fi
 
+# Handle remove mode
+if [[ "$REMOVE_IMAGE" == true ]]; then
+    HASH_FILE=".claude-code-sandbox-hash"
+    
+    if [[ ! -f "$SANDBOX_FILE" ]]; then
+        echo "No workspace image to remove (no .claude-code-sandbox file found)"
+        exit 0
+    fi
+    
+    IMAGE_TO_REMOVE=$(cat "$SANDBOX_FILE")
+    echo "=== Removing Claude Code Sandbox Workspace ==="
+    echo "Image to remove: $IMAGE_TO_REMOVE"
+    echo ""
+    
+    # Check if image exists
+    if [[ -n "$(docker images -q $IMAGE_TO_REMOVE 2>/dev/null)" ]]; then
+        echo "Removing Docker image..."
+        if docker rmi "$IMAGE_TO_REMOVE"; then
+            echo "✅ Successfully removed image: $IMAGE_TO_REMOVE"
+        else
+            echo "❌ Failed to remove image: $IMAGE_TO_REMOVE"
+            echo "   The image might be in use by a running container"
+            exit 1
+        fi
+    else
+        echo "⚠️  Image not found in Docker: $IMAGE_TO_REMOVE"
+    fi
+    
+    # Remove state files
+    echo ""
+    echo "Removing state files..."
+    rm -f "$SANDBOX_FILE"
+    echo "✅ Removed .claude-code-sandbox"
+    
+    if [[ -f "$HASH_FILE" ]]; then
+        rm -f "$HASH_FILE"
+        echo "✅ Removed .claude-code-sandbox-hash"
+    fi
+    
+    echo ""
+    echo "✅ Workspace cleanup complete!"
+    exit 0
+fi
+
 # Check if tools are specified without --build
 if [[ "$BUILD_IMAGE" != true && -n "$INSTALL_TOOLS" ]]; then
     echo "Error: Tools can only be installed with --build flag"
@@ -314,9 +371,14 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 # Check if base image needs to be built/updated
 BASE_IMAGE_EXISTS="$(docker images -q $BASE_IMAGE_NAME 2> /dev/null)"
-if [[ -z "$BASE_IMAGE_EXISTS" ]]; then
-    echo "Building shared base image: $BASE_IMAGE_NAME"
-    docker build -f "$SCRIPT_DIR/Dockerfile" --target base -t $BASE_IMAGE_NAME "$SCRIPT_DIR"
+if [[ -z "$BASE_IMAGE_EXISTS" ]] || [[ "$REBUILD_IMAGE" == true ]]; then
+    if [[ "$REBUILD_IMAGE" == true ]]; then
+        echo "Rebuilding shared base image without cache: $BASE_IMAGE_NAME"
+        docker build --no-cache -f "$SCRIPT_DIR/Dockerfile" --target base -t $BASE_IMAGE_NAME "$SCRIPT_DIR"
+    else
+        echo "Building shared base image: $BASE_IMAGE_NAME"
+        docker build -f "$SCRIPT_DIR/Dockerfile" --target base -t $BASE_IMAGE_NAME "$SCRIPT_DIR"
+    fi
 fi
 
 # Generate content hash for incremental build detection
@@ -334,6 +396,31 @@ elif [[ -n "$INSTALL_TOOLS" ]]; then
 elif [[ "$(docker images -q $IMAGE_NAME 2> /dev/null)" == "" ]]; then
     NEEDS_REBUILD=true
     echo "Image doesn't exist, rebuild needed"
+    # Auto-detect .tool-versions for new workspaces
+    if [[ -f ".tool-versions" && -z "$INSTALL_TOOLS" ]]; then
+        echo "Found .tool-versions file, parsing for tool installation..."
+        # Parse .tool-versions file and convert to comma-separated format
+        TOOL_VERSIONS_CONTENT=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip empty lines and comments
+            if [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
+                # Extract plugin and version
+                read -r plugin version <<< "$line"
+                if [[ -n "$plugin" && -n "$version" ]]; then
+                    if [[ -n "$TOOL_VERSIONS_CONTENT" ]]; then
+                        TOOL_VERSIONS_CONTENT="$TOOL_VERSIONS_CONTENT,$plugin@$version"
+                    else
+                        TOOL_VERSIONS_CONTENT="$plugin@$version"
+                    fi
+                fi
+            fi
+        done < ".tool-versions"
+        
+        if [[ -n "$TOOL_VERSIONS_CONTENT" ]]; then
+            INSTALL_TOOLS="$TOOL_VERSIONS_CONTENT"
+            echo "Installing tools from .tool-versions: $INSTALL_TOOLS"
+        fi
+    fi
 elif [[ ! -f "$HASH_FILE" ]] || [[ "$(cat "$HASH_FILE" 2>/dev/null)" != "$CONTENT_HASH" ]]; then
     NEEDS_REBUILD=true
     echo "Configuration changed, incremental rebuild needed"
@@ -347,6 +434,13 @@ if [[ "$NEEDS_REBUILD" == true ]]; then
         BUILD_ARGS="$BUILD_ARGS --build-arg INSTALL_TOOLS='$INSTALL_TOOLS'"
         echo "Installing tools: $INSTALL_TOOLS"
     fi
+    
+    # Add --no-cache flag if rebuild is requested
+    if [[ "$REBUILD_IMAGE" == true ]]; then
+        echo "Forcing full rebuild without cache..."
+        BUILD_ARGS="--no-cache $BUILD_ARGS"
+    fi
+    
     docker build $BUILD_ARGS -f "$SCRIPT_DIR/Dockerfile" --target workspace -t $IMAGE_NAME "$SCRIPT_DIR"
     
     # Save content hash for future incremental builds
@@ -507,7 +601,7 @@ if [ -t 0 ] || [ "$NON_INTERACTIVE" = true ]; then
             -e TERM="$TERM" \
             --init \
             $IMAGE_NAME \
-            claude-wrapper --dangerously-skip-permissions "$@"
+            bash -c "source ~/.asdf/asdf.sh 2>/dev/null || true; if ! command -v node >/dev/null 2>&1; then echo 'No Node.js found, installing LTS...'; asdf plugin add nodejs 2>/dev/null || true; asdf install nodejs lts; asdf global nodejs lts; fi; claude-wrapper --dangerously-skip-permissions $*"
     fi
 else
     echo "Error: This script requires an interactive terminal (TTY)."

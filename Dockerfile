@@ -1,6 +1,6 @@
 # Multi-stage build for shared base layers
 # Stage 1: Base image with common tools (shared across all workspaces)
-FROM node:22-slim AS base
+FROM debian:bookworm-slim AS base
 
 # Build arguments
 ARG BASE_IMAGE=""
@@ -56,11 +56,12 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
     apt-get install -y docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code as root
-RUN npm install -g @anthropic-ai/claude-code
-
 # Create python symlink for consistency
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Create node user and group
+RUN groupadd -r node -g 1000 && \
+    useradd -r -g node -u 1000 -m -d /home/node -s /bin/bash node
 
 # Install asdf for the node user
 RUN gosu 1000:1000 sh -c "git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.14.1"
@@ -80,13 +81,28 @@ RUN gosu 1000:1000 sh -c "echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.
 # Add node user to docker group for Docker socket access
 RUN addgroup docker || true && adduser node docker
 
-# Create a wrapper script to fix the shebang issue and source asdf
+# Create a wrapper script that installs claude-code on first run and sources asdf
 RUN echo '#!/bin/bash' > /usr/local/bin/claude-wrapper && \
     echo 'source ~/.asdf/asdf.sh 2>/dev/null || true' >> /usr/local/bin/claude-wrapper && \
-    echo 'exec node --no-warnings --enable-source-maps /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js "$@"' >> /usr/local/bin/claude-wrapper && \
+    echo '' >> /usr/local/bin/claude-wrapper && \
+    echo '# Check if Node.js is available' >> /usr/local/bin/claude-wrapper && \
+    echo 'if ! command -v node >/dev/null 2>&1; then' >> /usr/local/bin/claude-wrapper && \
+    echo '    echo "Error: Node.js is not installed. Please install Node.js first."' >> /usr/local/bin/claude-wrapper && \
+    echo '    exit 1' >> /usr/local/bin/claude-wrapper && \
+    echo 'fi' >> /usr/local/bin/claude-wrapper && \
+    echo '' >> /usr/local/bin/claude-wrapper && \
+    echo '# Install claude-code if not already installed for current Node.js version' >> /usr/local/bin/claude-wrapper && \
+    echo 'CLAUDE_PATH=$(npm root -g 2>/dev/null)/@anthropic-ai/claude-code/cli.js' >> /usr/local/bin/claude-wrapper && \
+    echo 'if [[ ! -f "$CLAUDE_PATH" ]]; then' >> /usr/local/bin/claude-wrapper && \
+    echo '    echo "Installing Claude Code for current Node.js version..."' >> /usr/local/bin/claude-wrapper && \
+    echo '    npm install -g @anthropic-ai/claude-code' >> /usr/local/bin/claude-wrapper && \
+    echo '    asdf reshim nodejs' >> /usr/local/bin/claude-wrapper && \
+    echo 'fi' >> /usr/local/bin/claude-wrapper && \
+    echo '' >> /usr/local/bin/claude-wrapper && \
+    echo 'exec node --no-warnings --enable-source-maps "$CLAUDE_PATH" "$@"' >> /usr/local/bin/claude-wrapper && \
     chmod +x /usr/local/bin/claude-wrapper
 
-# Create a script to setup user and run claude
+# Create a script to setup user and run commands
 RUN echo '#!/bin/bash' > /usr/local/bin/setup-and-run && \
     echo 'USER_ID=${HOST_USER_ID:-1000}' >> /usr/local/bin/setup-and-run && \
     echo 'GROUP_ID=${HOST_GROUP_ID:-1000}' >> /usr/local/bin/setup-and-run && \
@@ -95,7 +111,8 @@ RUN echo '#!/bin/bash' > /usr/local/bin/setup-and-run && \
     echo '  groupadd -g "$GROUP_ID" "$USERNAME" 2>/dev/null || true' >> /usr/local/bin/setup-and-run && \
     echo '  useradd -u "$USER_ID" -g "$GROUP_ID" -d "/home/$USERNAME" -m "$USERNAME" 2>/dev/null || true' >> /usr/local/bin/setup-and-run && \
     echo 'fi' >> /usr/local/bin/setup-and-run && \
-    echo 'exec gosu "$USER_ID:$GROUP_ID" bash -c "source ~/.asdf/asdf.sh 2>/dev/null || true; claude-wrapper \$*"' >> /usr/local/bin/setup-and-run && \
+    echo '# Run the command as the specified user' >> /usr/local/bin/setup-and-run && \
+    echo 'exec gosu "$USER_ID:$GROUP_ID" bash -c "$*"' >> /usr/local/bin/setup-and-run && \
     chmod +x /usr/local/bin/setup-and-run
 
 # Stage 2: Workspace-specific image with tools (inherits from base)

@@ -45,6 +45,7 @@ maven 3.9.6" > .tool-versions
 - 🏠 **Workspace-Specific Images**: Each workspace gets its own Docker image for complete tool isolation
 - ⚡ **Incremental Builds**: Smart caching only rebuilds when tools or configuration change
 - 🚀 **Shared Base Layers**: Efficient Docker layer sharing reduces disk usage across workspaces
+- 🧹 **Workspace Management**: Clean up old images, force rebuilds, and remove workspace state
 - 🔧 **Configuration Mounting**: Automatically detects and mounts common development configurations
 - 🔧 **Auto-completion**: Bash and Zsh completion for commands and tool names
 - 🛡️ **Security**: Sandboxed execution prevents potential system modifications
@@ -160,6 +161,9 @@ claude-code-sandbox
 claude-code-sandbox --build
 claude-code-sandbox -b    # Short form
 
+# Force complete rebuild without cache (useful for debugging)
+claude-code-sandbox --rebuild
+
 # Enter interactive shell instead of Claude Code
 claude-code-sandbox --shell
 claude-code-sandbox -s    # Short form
@@ -171,6 +175,15 @@ claude-code-sandbox -n "command to run"    # Short form
 # Enable Docker access inside container (by mounting docker socket)
 claude-code-sandbox --docker
 claude-code-sandbox -d    # Short form
+
+# Remove current workspace image and state files
+claude-code-sandbox --remove
+
+# Clean up old workspace images (7+ days old by default)
+claude-code-sandbox --cleanup
+
+# Clean up images older than specific threshold
+claude-code-sandbox --cleanup --older-than=3
 
 # Combine flags (build and then enter shell)
 claude-code-sandbox -bs
@@ -238,6 +251,36 @@ claude-code-sandbox --shell  # Interactive shell with all tools in PATH
 ```
 
 This eliminates the need to specify tools manually for projects that already use [asdf](https://asdf-vm.com/).
+
+### Workspace Management
+
+The system provides several commands for managing workspace images and cleaning up disk space:
+
+**Rebuild Options:**
+```bash
+# Standard rebuild (uses Docker cache)
+claude-code-sandbox --build
+
+# Force complete rebuild without cache (useful for troubleshooting)
+claude-code-sandbox --rebuild
+```
+
+**Workspace Cleanup:**
+```bash
+# Remove current workspace image and state files
+claude-code-sandbox --remove
+
+# Clean up old workspace images (7+ days old by default)
+claude-code-sandbox --cleanup
+
+# Clean up images older than specific threshold (in days)
+claude-code-sandbox --cleanup --older-than=3
+
+# Preview what would be cleaned without actually doing it
+claude-code-sandbox --cleanup --dry-run
+```
+
+The cleanup commands help manage disk space by removing workspace images that haven't been used recently. Each workspace maintains its own Docker image, so cleanup is important for long-term disk usage management.
 
 ### Workspace-Specific Images
 
@@ -365,6 +408,14 @@ The Docker container includes:
 If you encounter build issues:
 
 ```bash
+# Standard rebuild (uses Docker cache)
+claude-code-sandbox --build
+
+# Force complete rebuild without cache (useful for troubleshooting)
+claude-code-sandbox --rebuild
+
+# Remove current workspace and start fresh
+claude-code-sandbox --remove
 claude-code-sandbox --build
 ```
 
@@ -424,6 +475,27 @@ Ensure Docker is installed and running:
 ```bash
 docker --version
 docker ps
+```
+
+### Disk Space Management
+
+Over time, workspace images can accumulate and consume significant disk space. Use these commands to manage storage:
+
+```bash
+# Check current workspace image size
+docker images | grep claude-code-sandbox
+
+# Clean up old workspace images (7+ days old)
+claude-code-sandbox --cleanup
+
+# Clean up more aggressively (3+ days old)
+claude-code-sandbox --cleanup --older-than=3
+
+# Preview cleanup without actually removing images
+claude-code-sandbox --cleanup --dry-run
+
+# Remove current workspace entirely
+claude-code-sandbox --remove
 ```
 
 ## How It Works
